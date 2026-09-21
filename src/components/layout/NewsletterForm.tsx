@@ -104,7 +104,21 @@ export function NewsletterForm({ content, className, action = '/api/contact' }: 
   }
 
   return (
-    <form onSubmit={handleSubmit} noValidate className={cn('flex flex-col gap-3', className)}>
+    <form
+      /*
+        Same reason as the contact form: without `action`/`method` a submit made
+        with JavaScript disabled becomes a GET to the current page and leaks the
+        subscriber's address into the URL and the referrer.
+
+        It reads the `action` prop, exactly like the fetch() above, so an
+        endpoint override reaches BOTH paths instead of only the enhanced one.
+      */
+      action={action}
+      method="post"
+      onSubmit={handleSubmit}
+      noValidate
+      className={cn('flex flex-col gap-3', className)}
+    >
       <div className="flex flex-col gap-3 sm:flex-row">
         <div className="flex-1">
           <label htmlFor={emailId} className="sr-only">
@@ -143,6 +157,17 @@ export function NewsletterForm({ content, className, action = '/api/contact' }: 
           onChange={(event) => setHoneypot(event.target.value)}
         />
       </div>
+
+      {/*
+        Only the no-JavaScript path reads these: the fetch() above builds its own
+        body and ignores them. They carry the two fields /api/contact requires
+        but this form never asks a subscriber for — a name and a message — so a
+        native submission validates instead of bouncing back as "revisa los
+        datos". Both are constants from the content module, never user input,
+        and the route re-validates them like every other field.
+      */}
+      <input type="hidden" name="name" value={content.fallbackName} readOnly />
+      <input type="hidden" name="message" value={content.submissionMessage} readOnly />
 
       <div className="flex items-start gap-2.5">
         <input

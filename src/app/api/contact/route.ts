@@ -1,8 +1,14 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
+import { contactStatusLocation, type ContactStatusCode } from '@/lib/contact-status';
 import { env } from '@/lib/env';
-import { checkRateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
+import {
+  checkRateLimit,
+  clientBucketFromHeaders,
+  sharedBucketKey,
+  type RateLimitVerdict,
+} from '@/lib/rate-limit';
 
 /**
  * POST /api/contact
@@ -10,12 +16,23 @@ import { checkRateLimit, clientKeyFromHeaders } from '@/lib/rate-limit';
  * OWASP notes, in order of the checks performed below:
  *  A01 — no client-supplied identity is trusted; there is nothing to authorize,
  *        and the route never reads a role, id or flag from the body.
- *  A04 — fixed-window rate limit plus a honeypot field before any work is done.
- *  A03 — the body is parsed by Zod in strict mode: unknown keys are rejected and
- *        every field is length-bounded. Nothing is interpolated anywhere.
- *  A09 — failures are logged server-side with field NAMES only, and the response
- *        never echoes user input back.
- *  A10 — no URL from the payload is ever fetched. Links, if any, are only stored.
+ *  A04 — rate limit plus a honeypot field before any work is done. The limit is
+ *        keyed on forwarding headers ONLY where the deployment declares a proxy
+ *        that overwrites them (env.TRUST_PROXY_HEADERS); everywhere else every
+ *        request shares one bucket, because a header an attacker controls is a
+ *        bucket an attacker can reset.
+ *  A03 — one Zod schema in strict mode validates BOTH content types: unknown
+ *        keys are rejected and every field is length-bounded.
+ *  A09 — failures are logged server-side with field NAMES only, and neither the
+ *        JSON response nor the redirect ever echoes user input back.
+ *  A10 — no URL from the payload is ever fetched, and the redirect target is a
+ *        fixed root-relative path, never anything read off the request.
+ *
+ * TWO CONTENT TYPES, ONE PIPELINE. `application/json` is the enhanced path used
+ * by fetch(). `application/x-www-form-urlencoded` is what a browser sends when
+ * JavaScript never ran: it is a full page navigation, so answering it with a
+ * JSON body would paint raw `{"ok":false,...}` over the whole window. That
+ * branch answers 303 to `/contacto/estado` instead, which is an ordinary page.
  *
  * Only POST is exported, so every other method answers 405 automatically.
  */
@@ -24,6 +41,9 @@ export const dynamic = 'force-dynamic';
 
 /** Hard ceiling on the request body. Anything larger is rejected unparsed. */
 const MAX_BODY_BYTES = 8 * 1024;
+
+/** Rate-limit namespace for this endpoint. */
+const SCOPE = 'contact';
 
 const contactSchema = z
   .object({
@@ -42,37 +62,142 @@ const contactSchema = z
   })
   .strict();
 
+/**
+ * Keys copied out of a urlencoded body, as an allowlist.
+ *
+ * Deliberately not "every entry": browsers add their own (a named submit
+ * button, `utf8` sentinels from some stacks) and those would trip `.strict()`.
+ * Narrowing the input can only reject data, never smuggle it in.
+ */
+const FORM_FIELDS = ['name', 'email', 'company', 'message', 'budget', 'website'] as const;
+
+type RequestKind = 'json' | 'form';
+
 const GENERIC_HEADERS: Readonly<Record<string, string>> = {
   'Cache-Control': 'no-store',
 };
 
-function jsonError(code: string, status: number, extraHeaders: Readonly<Record<string, string>> = {}) {
+function requestKind(contentType: string): RequestKind | null {
+  const type = contentType.toLowerCase();
+
+  if (type.includes('application/json')) {
+    return 'json';
+  }
+
+  return type.includes('application/x-www-form-urlencoded') ? 'form' : null;
+}
+
+/**
+ * Shapes a urlencoded body like the JSON one so a SINGLE schema stays the only
+ * validation authority. Browser quirks are absorbed here and nowhere else:
+ *  - an unchecked checkbox is absent from the body, a checked one sends `on`;
+ *  - an untouched optional control sends `""`, which must be dropped rather
+ *    than fail a length or enum rule;
+ *  - a repeated key collapses to its first value.
+ */
+function payloadFromForm(body: URLSearchParams): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+
+  for (const field of FORM_FIELDS) {
+    const raw = body.get(field);
+
+    if (raw !== null && raw.trim() !== '') {
+      payload[field] = raw;
+    }
+  }
+
+  payload.consent = body.get('consent') !== null;
+
+  return payload;
+}
+
+function jsonError(
+  code: string,
+  status: number,
+  extraHeaders: Readonly<Record<string, string>> = {},
+) {
   return NextResponse.json(
     { ok: false, error: code },
     { status, headers: { ...GENERIC_HEADERS, ...extraHeaders } },
   );
 }
 
-export async function POST(request: Request) {
-  const rateKey = clientKeyFromHeaders(request.headers, 'contact');
-  const verdict = checkRateLimit(rateKey, {
-    max: env.CONTACT_RATE_LIMIT_MAX,
-    windowMs: env.CONTACT_RATE_LIMIT_WINDOW_MS,
+/** 303: the browser must follow it with GET, so a refresh cannot resubmit. */
+function statusRedirect(
+  code: ContactStatusCode,
+  extraHeaders: Readonly<Record<string, string>> = {},
+) {
+  return new NextResponse(null, {
+    status: 303,
+    headers: { ...GENERIC_HEADERS, ...extraHeaders, Location: contactStatusLocation(code) },
   });
+}
+
+/** One outcome, rendered the way the caller can actually consume it. */
+function outcome(
+  kind: RequestKind,
+  failure: { readonly code: string; readonly status: number; readonly statusCode: ContactStatusCode },
+  extraHeaders: Readonly<Record<string, string>> = {},
+) {
+  return kind === 'form'
+    ? statusRedirect(failure.statusCode, extraHeaders)
+    : jsonError(failure.code, failure.status, extraHeaders);
+}
+
+const INVALID = { code: 'INVALID_REQUEST', status: 400, statusCode: 'invalid' } as const;
+const TOO_LARGE = { code: 'PAYLOAD_TOO_LARGE', status: 413, statusCode: 'invalid' } as const;
+const RATE_LIMITED = { code: 'RATE_LIMITED', status: 429, statusCode: 'rate-limited' } as const;
+const FAILED = { code: 'INTERNAL_ERROR', status: 500, statusCode: 'error' } as const;
+
+function accepted(kind: RequestKind) {
+  return kind === 'form'
+    ? statusRedirect('ok')
+    : NextResponse.json({ ok: true }, { status: 200, headers: GENERIC_HEADERS });
+}
+
+/**
+ * Charges the endpoint ceiling first, then the per-client bucket when — and
+ * only when — the deployment can actually tell clients apart. Charging both
+ * keys for an unidentified client would double-count the same bucket.
+ */
+function rateLimitVerdict(headers: Headers): RateLimitVerdict {
+  const windowMs = env.CONTACT_RATE_LIMIT_WINDOW_MS;
+
+  const shared = checkRateLimit(sharedBucketKey(SCOPE), {
+    max: env.CONTACT_RATE_LIMIT_SHARED_MAX,
+    windowMs,
+  });
+
+  if (!shared.allowed) {
+    return shared;
+  }
+
+  const bucket = clientBucketFromHeaders(headers, SCOPE, {
+    trustProxyHeaders: env.TRUST_PROXY_HEADERS,
+  });
+
+  return bucket.identified
+    ? checkRateLimit(bucket.key, { max: env.CONTACT_RATE_LIMIT_MAX, windowMs })
+    : shared;
+}
+
+export async function POST(request: Request) {
+  // Read before any work, so the rejection below can already be shaped for the
+  // caller. Reading one header costs nothing.
+  const kind = requestKind(request.headers.get('content-type') ?? '');
+  const verdict = rateLimitVerdict(request.headers);
 
   if (!verdict.allowed) {
     console.error('[contact] rate limit exceeded for one client bucket');
 
-    return jsonError('RATE_LIMITED', 429, {
+    return outcome(kind ?? 'json', RATE_LIMITED, {
       'Retry-After': String(verdict.retryAfterSeconds),
       'X-RateLimit-Limit': String(verdict.limit),
       'X-RateLimit-Remaining': '0',
     });
   }
 
-  const contentType = request.headers.get('content-type') ?? '';
-
-  if (!contentType.toLowerCase().includes('application/json')) {
+  if (kind === null) {
     return jsonError('UNSUPPORTED_MEDIA_TYPE', 415);
   }
 
@@ -81,23 +206,27 @@ export async function POST(request: Request) {
   try {
     rawBody = await request.text();
   } catch {
-    return jsonError('INVALID_REQUEST', 400);
+    return outcome(kind, INVALID);
   }
 
   if (Buffer.byteLength(rawBody, 'utf8') > MAX_BODY_BYTES) {
     console.error('[contact] rejected oversized payload');
 
-    return jsonError('PAYLOAD_TOO_LARGE', 413);
+    return outcome(kind, TOO_LARGE);
   }
 
   let payload: unknown;
 
-  try {
-    payload = JSON.parse(rawBody);
-  } catch {
-    console.error('[contact] rejected malformed JSON payload');
+  if (kind === 'json') {
+    try {
+      payload = JSON.parse(rawBody);
+    } catch {
+      console.error('[contact] rejected malformed JSON payload');
 
-    return jsonError('INVALID_REQUEST', 400);
+      return outcome(kind, INVALID);
+    }
+  } else {
+    payload = payloadFromForm(new URLSearchParams(rawBody));
   }
 
   const parsed = contactSchema.safeParse(payload);
@@ -110,7 +239,7 @@ export async function POST(request: Request) {
 
     console.error(`[contact] validation failed for fields: ${invalidFields.join(', ')}`);
 
-    return jsonError('INVALID_REQUEST', 400);
+    return outcome(kind, INVALID);
   }
 
   const submission = parsed.data;
@@ -120,7 +249,7 @@ export async function POST(request: Request) {
     // and drop the message.
     console.error('[contact] honeypot triggered, submission discarded');
 
-    return NextResponse.json({ ok: true }, { status: 200, headers: GENERIC_HEADERS });
+    return accepted(kind);
   }
 
   try {
@@ -130,10 +259,10 @@ export async function POST(request: Request) {
     // payload (OWASP A10).
     void env.CONTACT_INBOX;
 
-    return NextResponse.json({ ok: true }, { status: 200, headers: GENERIC_HEADERS });
+    return accepted(kind);
   } catch {
     console.error('[contact] delivery failed');
 
-    return jsonError('INTERNAL_ERROR', 500);
+    return outcome(kind, FAILED);
   }
 }

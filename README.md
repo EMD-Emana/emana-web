@@ -132,10 +132,24 @@ mantener `font-src 'self'`. La escala es fluida con `clamp()`.
 - Cada `<section>` tiene `id` y `aria-labelledby` apuntando al id de su título.
 - Iconos y SVG decorativos con `aria-hidden="true"`; imágenes con significado,
   con `alt` real.
-- `next/image` con `width`/`height` explícitos y `priority` sólo en el hero.
+- No hay imágenes rasterizadas: cada visual es SVG en línea dibujado con los
+  tokens, así que `next/image` no interviene. La única imagen del sitio es la
+  tarjeta para compartir, generada en build por `src/app/opengraph-image.tsx`
+  (`next/og`). Si más adelante entra una foto, va con `next/image`, `width` y
+  `height` explícitos y `priority` sólo si está en el hero.
 - JSON-LD: `src/lib/jsonld.tsx` expone `<JsonLd>` (serializa y escapa) más los
-  builders de sitio (Organization, WebSite, BreadcrumbList). Cada sección con
-  tipo schema.org propio exporta el suyo en `<Nombre>.schema.ts`.
+  builders de sitio y `buildJsonLdGraph`. Cada sección con tipo schema.org
+  propio exporta su builder en `<Nombre>.schema.ts`, y **la ruta los combina**:
+  `src/app/layout.tsx` emite un grafo con Organization + WebSite + ItemList de
+  navegación, y `src/app/page.tsx` emite un segundo grafo con los 13 nodos de la
+  portada. Las secciones aceptan `withSchema={false}` para no duplicarlos.
+
+### Rutas reales
+
+`/`, `/ideas`, `/ideas/<slug>` (3, prerenderizadas desde `Insights.content.ts`),
+`/privacidad`, `/terminos`, `/cookies`, más `sitemap.xml`, `robots.txt`,
+`opengraph-image` y la API `POST /api/contact`. Los anclajes de la portada
+(`#servicios`, `#faq`, ...) no son rutas y no entran al sitemap.
 
 ## Seguridad (OWASP Top 10)
 
@@ -165,10 +179,32 @@ Copy del sitio: **español neutro profesional** (audiencia LatAm), sin regionali
 Código, identificadores, nombres de archivo, comentarios y mensajes de commit:
 **inglés**, siempre.
 
-## Pendientes del esqueleto
+## Pendientes antes de publicar
 
-- `public/og/default.png` (1200x630) y `public/logo.svg` están referenciados por
-  los metadatos y el JSON-LD: hay que añadir los archivos.
-- `src/components/layout/` (Header, Footer, MobileNav) y `src/sections/*` los
-  entregan los siguientes agentes.
-- `src/app/page.tsx` es un placeholder; el integrador lo reemplaza.
+El sitio compila, pasa lint y no tiene enlaces rotos, pero sigue siendo un caso
+de estudio. Nada de lo siguiente bloquea el build; todo bloquea una publicación.
+
+1. **Cifras, casos y testimonios inventados.** `Stats`, `CaseStudies`,
+   `Testimonials`, `Pricing` y `LogoMarquee` llevan datos ilustrativos. Los
+   testimonios y los precios ya viajan en JSON-LD (`AggregateRating`, `Offer`):
+   publicarlos sin sustituirlos por datos verificables sería marcado falso.
+   `Stats` y `LogoMarquee` no emiten schema justamente por eso.
+2. **Cuerpo de las notas.** `/ideas/<slug>` publica el resumen real y dice de
+   forma visible que la nota está en preparación, porque `Insights.content.ts`
+   no tiene cuerpo. Hay que escribirlas o retirar los nodos `BlogPosting` del
+   grafo de la portada: contenido escaso con marcado de artículo es peor que no
+   tener marcado.
+3. **Documentos legales.** `/privacidad`, `/terminos` y `/cookies` son esquemas
+   de referencia y lo declaran en un aviso en la propia página. Hay que
+   reemplazarlos por texto revisado legalmente.
+4. **Formulario sin JavaScript.** Ambos formularios llevan
+   `action="/api/contact"` y `method="post"`, así que el envío nunca acaba en la
+   barra de direcciones. Pero la ruta sólo acepta JSON: sin JavaScript devuelve
+   415. Falta una Server Action o una rama `application/x-www-form-urlencoded`
+   con redirección interna fija.
+5. **Rate limit en memoria** y **CSP con `'unsafe-inline'`**: ver las dos notas
+   de la sección de seguridad.
+6. **Marca.** `site.name`, el correo de contacto y `public/logo.svg` son
+   marcadores. Las redes sociales apuntan a `example.com` a propósito, y
+   `selectOrganizationSameAs()` filtra esos dominios para que ningún perfil
+   inventado llegue a `sameAs`.

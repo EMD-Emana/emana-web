@@ -9,6 +9,7 @@ import { env } from '@/lib/env';
  * image in /public/og/default.png) with the real brand before shipping.
  * This module is server-only because it reads the validated env.
  */
+/** An explicit share image. Only needed when a route overrides the default. */
 export interface SiteImage {
   readonly url: string;
   readonly width: number;
@@ -22,7 +23,6 @@ export interface SiteConfig {
   readonly locale: string;
   readonly language: string;
   readonly tagline: string;
-  readonly defaultImage: SiteImage;
 }
 
 export const site: SiteConfig = {
@@ -31,12 +31,6 @@ export const site: SiteConfig = {
   locale: 'es_419',
   language: 'es',
   tagline: 'Estudio de producto e inteligencia artificial aplicada',
-  defaultImage: {
-    url: '/og/default.png',
-    width: 1200,
-    height: 630,
-    alt: 'AI Agency Studio: estudio de producto e inteligencia artificial aplicada',
-  },
 };
 
 export interface BuildMetadataInput {
@@ -45,6 +39,12 @@ export interface BuildMetadataInput {
   readonly description: string;
   /** Route path starting with "/". Used for the canonical URL. */
   readonly path?: string;
+  /**
+   * Overrides the generated share card. Leave it out and Next's file convention
+   * supplies src/app/opengraph-image.tsx — which is why nothing here points at a
+   * static path any more: the previous default advertised an /og/*.png that did
+   * not exist, so every share resolved a 404.
+   */
   readonly image?: SiteImage;
   readonly type?: 'website' | 'article';
   readonly noIndex?: boolean;
@@ -60,7 +60,7 @@ export function buildMetadata({
   title,
   description,
   path = '/',
-  image = site.defaultImage,
+  image,
   type = 'website',
   noIndex = false,
   publishedTime,
@@ -89,14 +89,20 @@ export function buildMetadata({
       title: fullTitle,
       description,
       locale: site.locale,
-      images: [{ url: image.url, width: image.width, height: image.height, alt: image.alt }],
+      ...(image === undefined
+        ? {}
+        : {
+            images: [
+              { url: image.url, width: image.width, height: image.height, alt: image.alt },
+            ],
+          }),
       ...(type === 'article' && publishedTime !== undefined ? { publishedTime } : {}),
     },
     twitter: {
       card: 'summary_large_image',
       title: fullTitle,
       description,
-      images: [image.url],
+      ...(image === undefined ? {} : { images: [image.url] }),
     },
     robots: noIndex
       ? { index: false, follow: false, nocache: true }

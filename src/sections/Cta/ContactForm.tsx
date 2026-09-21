@@ -138,6 +138,21 @@ export function ContactForm({ content, labelledById }: ContactFormProps) {
 
   return (
     <form
+      /*
+        `action` + `method` are the no-JavaScript floor, not decoration. A form
+        without them submits to the CURRENT url with method GET, which would put
+        the visitor's name, email and message into the address bar, the browser
+        history, the Referer header and the access log. Pointing it at the API
+        route with POST keeps the payload in the request body no matter what.
+        The handler below still owns the enhanced path and calls preventDefault.
+
+        It reads `content.endpoint`, the same value the fetch() above posts to:
+        the module declares ONE destination, so the two paths cannot drift when
+        someone edits Cta.content.ts. That route answers a urlencoded POST with
+        a redirect to a real page, so the fallback never shows a JSON body.
+      */
+      action={content.endpoint}
+      method="post"
       noValidate
       aria-labelledby={labelledById}
       aria-busy={pending}

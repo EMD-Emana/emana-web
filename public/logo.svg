@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="AI Agency Studio">
+  <title>AI Agency Studio</title>
+  <!--
+    Original mark for this case study: a node graph collapsing into a single
+    output, drawn with the project's design tokens. No brand, font or artwork
+    from any third party is used.
+      base #0A0A0F · accent #8B6CFF · accent-link #A88FFF · teal #00D4B8
+  -->
+  <defs>
+    <linearGradient id="logo-edge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8B6CFF" />
+      <stop offset="100%" stop-color="#00D4B8" />
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="#0A0A0F" />
+  <rect x="1" y="1" width="510" height="510" rx="111" fill="none" stroke="#26263A" stroke-width="2" />
+
+  <g stroke="url(#logo-edge)" stroke-width="14" stroke-linecap="round" fill="none">
+    <path d="M150 158 L256 256" />
+    <path d="M150 354 L256 256" />
+    <path d="M256 256 L362 256" />
+  </g>
+
+  <circle cx="150" cy="158" r="30" fill="#A88FFF" />
+  <circle cx="150" cy="354" r="30" fill="#A88FFF" />
+  <circle cx="256" cy="256" r="38" fill="#8B6CFF" />
+  <circle cx="362" cy="256" r="30" fill="#00D4B8" />
+</svg>

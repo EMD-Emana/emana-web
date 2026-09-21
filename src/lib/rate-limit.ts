@@ -80,19 +80,70 @@ export function checkRateLimit(key: string, options: RateLimitOptions): RateLimi
   };
 }
 
-/**
- * Derives a rate-limit key from request headers.
- *
- * `x-forwarded-for` is only trustworthy behind a proxy you control (Vercel,
- * Cloudflare, your own ingress). Direct-to-Node deployments must NOT trust it;
- * use the socket address instead. Falls back to a constant bucket so an
- * unidentifiable client is still limited rather than unlimited.
- */
-export function clientKeyFromHeaders(headers: Headers, scope: string): string {
-  const forwardedFor = headers.get('x-forwarded-for');
-  const firstHop = forwardedFor?.split(',')[0]?.trim();
-  const realIp = headers.get('x-real-ip')?.trim();
-  const ip = firstHop !== undefined && firstHop !== '' ? firstHop : (realIp ?? '');
+export interface ClientBucketOptions {
+  /**
+   * True ONLY when a proxy you control overwrites `x-forwarded-for` and
+   * `x-real-ip` on every request. Comes from `env.TRUST_PROXY_HEADERS`.
+   */
+  readonly trustProxyHeaders: boolean;
+}
 
-  return `${scope}:${ip === '' ? 'unknown' : ip}`;
+export interface ClientBucket {
+  readonly key: string;
+  /**
+   * False when the key identifies no one in particular, i.e. it is the shared
+   * endpoint-wide bucket. Callers must then apply the SHARED ceiling, never the
+   * per-client one.
+   */
+  readonly identified: boolean;
+}
+
+/** Longest forwarding value we will turn into a key (an IPv6 address plus zone). */
+const MAX_ADDRESS_LENGTH = 64;
+
+/** Hex, dots, colons and dashes cover IPv4, IPv6 and their mapped forms. */
+const ADDRESS_PATTERN = /^[0-9a-fA-F.:%-]+$/;
+
+/**
+ * The bucket every request falls into when no client can be told apart.
+ *
+ * Exported so the caller can charge this bucket on EVERY request, including the
+ * ones that also get a per-client bucket: it is the endpoint's own ceiling.
+ */
+export function sharedBucketKey(scope: string): string {
+  return `${scope}:shared`;
+}
+
+/**
+ * Derives the rate-limit bucket for one request.
+ *
+ * THE TRUST PROBLEM. `x-forwarded-for` and `x-real-ip` are plain request
+ * headers: anyone can send any value. Behind a proxy that rewrites them they
+ * identify the client; in front of one they are attacker input, and keying the
+ * limiter on attacker input means the attacker picks a fresh empty bucket on
+ * every request — the limiter allows all of them and the control is gone.
+ *
+ * So the headers are read only when the DEPLOYMENT declares the proxy exists
+ * (`trustProxyHeaders`). Otherwise this fails closed to the shared bucket: the
+ * endpoint keeps a ceiling nobody can dodge, instead of a per-client limit
+ * anybody can reset. A malformed or oversized value is treated the same way.
+ */
+export function clientBucketFromHeaders(
+  headers: Headers,
+  scope: string,
+  options: ClientBucketOptions,
+): ClientBucket {
+  if (!options.trustProxyHeaders) {
+    return { key: sharedBucketKey(scope), identified: false };
+  }
+
+  const firstHop = headers.get('x-forwarded-for')?.split(',')[0]?.trim();
+  const address =
+    firstHop !== undefined && firstHop !== '' ? firstHop : (headers.get('x-real-ip')?.trim() ?? '');
+
+  if (address === '' || address.length > MAX_ADDRESS_LENGTH || !ADDRESS_PATTERN.test(address)) {
+    return { key: sharedBucketKey(scope), identified: false };
+  }
+
+  return { key: `${scope}:ip:${address.toLowerCase()}`, identified: true };
 }
